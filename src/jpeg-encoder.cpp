@@ -2,55 +2,92 @@
 #include <string.h>
 #include <stdlib.h>
 #include <math.h>
+#include <dirent.h>
+#include <sys/stat.h>
+#include <errno.h>
 
+#include <algorithm>
 
 #define STB_IMAGE_IMPLEMENTATION
 #include "stb_image.h"
 
-#include "util.h"
+#define STB_IMAGE_WRITE_IMPLEMENTATION
+#include "stb_image_write.h"
 
 
-#define COEFFS(Cu,Cv,u,v) { \
-	if (u == 0) Cu = 1.0f / sqrtf(2.0f); else Cu = 1.0f; \
-	if (v == 0) Cv = 1.0f / sqrtf(2.0f); else Cv = 1.0f; \
-	}
-
-#define PI 3.141592653589793f
 
 /* JPEG (sequential) encoding
 	Color space transformation : Checked!
-	Block splitting (no padding for now) : 
-	Discrete cosine transform
-	Quantization
-	Entropy coding
+	Block splitting (no padding for now) : Checked
+	Discrete cosine transform : Checked
+	Quantization : Checked
+	Entropy coding (Optional)
 */
  
 // TODO: 	Improve Performance
 // 			Create a CUDA version.
 
 // O(n^4)
-void dct(float inputBlock[8][8], float outputBlock[8][8]) {
+void dct(float block[8][8]) {
 
+	const float PI = 3.141592653589793f;
 	int u, v, x, y;
+	float temp[8][8];
 
-	for (u = 0; u < 8; u++) {
+	for (v = 0; v < 8; v++) {
+		for (u = 0; u < 8; u++) {
 
-		for (v = 0; v < 8; v++) {
+			float sum = 0.0f;
+			float cu = (u == 0) ? 1.0f / sqrtf(2.0f) : 1.0f;
+			float cv = (v == 0) ? 1.0f / sqrtf(2.0f) : 1.0f;
 
-			float cU, cV, sum = 0.0f;
-			COEFFS(cU, cV, u, v);
-
-			for (x = 0; x < 8; x++) {
-
-				for (y = 0; y < 8; y++) {
-
-					sum += inputBlock[x][y] * 
+			for (y = 0; y < 8; y++) {
+				for (x = 0; x < 8; x++) {
+					sum += block[y][x] *
 					cosf((2.0f * x + 1.0f) * u * PI / 16.0f) *
 					cosf((2.0f * y + 1.0f) * v * PI / 16.0f);
-				}	
+				}
 			}
 
-			outputBlock[u][v] = 0.25f * cU * cV * sum;
+			temp[v][u] = 0.25f * cu * cv * sum;
+		}
+	}
+
+	for (v = 0; v < 8; v++) {
+		for (u = 0; u < 8; u++) {
+			block[v][u] = temp[v][u];
+		}
+	}
+}
+
+void idct(float block[8][8]) {
+
+	const float PI = 3.141592653589793f;
+	int u, v, x, y;
+	float temp[8][8];
+
+	for (v = 0; v < 8; v++) {
+		for (u = 0; u < 8; u++) {
+
+			float sum = 0.0f;
+			float cu = (u == 0) ? 1.0f / sqrtf(2.0f) : 1.0f;
+			float cv = (v == 0) ? 1.0f / sqrtf(2.0f) : 1.0f;
+
+			for (y = 0; y < 8; y++) {
+				for (x = 0; x < 8; x++) {
+					sum += block[y][x] * cu * cv *
+					cosf((2.0f * x + 1.0f) * u * PI / 16.0f) *
+					cosf((2.0f * y + 1.0f) * v * PI / 16.0f);
+				}
+			}
+
+			temp[v][u] = 0.25f * sum;
+		}
+	}
+
+	for (v = 0; v < 8; v++) {
+		for (u = 0; u < 8; u++) {
+			block[v][u] = temp[v][u];
 		}
 	}
 }
@@ -79,170 +116,215 @@ const int Q_CHROMINANCE[8][8] = {
     {99, 99, 99, 99, 99, 99, 99, 99}
 };
 
-void quantizeBlock(	float dctBlock[8][8], 
-					int quantizedBlock[8][8],
-					const int qTable[8][8]) 
+void quantizeBlock(float block[8][8], int channel) 
 {
+	float temp[8][8];
+	int u, v;
+	for (u = 0; u < 8; u++) {
+		for (v = 0; v < 8; v++) {
+			float quantizedFactor = (channel == 0) ? 
+			Q_LUMINANCE[u][v] : Q_CHROMINANCE[u][v];
+			float quantized = block[u][v] / quantizedFactor;
+			temp[u][v] = (int)roundf(quantized);
+		}
+	}
 
-	for (int u = 0; u < 8; u++) {
-		for (int v = 0; v < 8; v++) {
-			float quantized = dctBlock[u][v] / qTable[u][v];
-			quantizedBlock[u][v] = (int)roundf(quantized);
+	for (u = 0; u < 8; u++) {
+		for (v = 0; v < 8; v++) {
+			block[u][v] = temp[u][v];
 		}
 	}
 
 }
 
-const int ZIGZAG_INDEX[64][2] = {
-    {0,0}, {0,1}, {1,0}, {2,0}, {1,1}, {0,2}, {0,3}, {1,2},
-    {2,1}, {3,0}, {4,0}, {3,1}, {2,2}, {1,3}, {0,4}, {0,5},
-    {1,4}, {2,3}, {3,2}, {4,1}, {5,0}, {6,0}, {5,1}, {4,2},
-    {3,3}, {2,4}, {1,5}, {0,6}, {0,7}, {1,6}, {2,5}, {3,4},
-    {4,3}, {5,2}, {6,1}, {7,0}, {7,1}, {6,2}, {5,3}, {4,4},
-    {3,5}, {2,6}, {1,7}, {2,7}, {3,6}, {4,5}, {5,4}, {6,3},
-    {7,2}, {7,3}, {6,4}, {5,5}, {4,6}, {3,7}, {4,7}, {5,6},
-    {6,5}, {7,4}, {7,5}, {6,6}, {5,7}, {6,7}, {7,6}, {7,7}
-};
+void dequantizeBlock(float block[8][8], int channel) {
+		float temp[8][8];
+	int u, v;
+	for (u = 0; u < 8; u++) {
+		for (v = 0; v < 8; v++) {
+			float quantizedFactor = (channel == 0) ? 
+			Q_LUMINANCE[u][v] : Q_CHROMINANCE[u][v];
+			float quantized = block[u][v] * quantizedFactor;
+			temp[u][v] = (int)roundf(quantized);
+		}
+	}
 
-// Flattens your 2D quantized block array into a 1D sequence
-void zigzagScanBlock(int qInputBlock[8][8], int outputVector[64]) {
-    for (int i = 0; i < 64; i++) {
-        int r = ZIGZAG_INDEX[i][0];
-        int c = ZIGZAG_INDEX[i][1];
-        outputVector[i] = qInputBlock[r][c];
-    }
+	for (u = 0; u < 8; u++) {
+		for (v = 0; v < 8; v++) {
+			block[u][v] = temp[u][v];
+		}
+	}
 }
 
-int main() {
+void RGBToYCbCr(unsigned char *RGB, unsigned char *YCbCr, int n) {
 
-	char * baseImgDir = "kodak-image-suite/PhotoCD_PCD0992/";
-	char * imgName = "19.png";
-	char imgPath[100] = {0};
-	strcat(imgPath, baseImgDir);
-	strcat(imgPath, imgName);
+	int i;
+	for (i = 0; i < n; i += 3) {
 
-	int x, y, n;
-	unsigned char * imgData = stbi_load(imgPath, &x, &y, &n, 0);
+		unsigned char r = RGB[i];
+		unsigned char g = RGB[i + 1];
+		unsigned char b = RGB[i + 2];
+
+
+		unsigned char Y  =  (unsigned char)(0.29900f * r + 0.58700f * g + 0.11400f * b);
+		unsigned char Cb = (unsigned char)(-0.16874f * r - 0.33126f * g + 0.50000f * b + 128.0f);
+		unsigned char Cr =  (unsigned char) (0.50000f * r - 0.41869f * g - 0.08131f * b + 128.0f);
+
+		YCbCr[i] = Y;
+		YCbCr[i + 1] = Cb;
+		YCbCr[i + 2] = Cr;
+
+		// Debugging.
+		// if (i < 15) {
+		// 	printf("Pixel %d -> Y: %f, Cb: %f, Cr: %f\n", i/3, Y, Cb, Cr);
+		// }
+	}
+}	
+
+void YCbCrToRGB(unsigned char *YCbCr, unsigned char *RGB, int n) {
+
+	int i;
+	for (i = 0; i < n; i += 3) {
+
+		unsigned char Y = YCbCr[i];
+		unsigned char Cb = YCbCr[i + 1];
+		unsigned char Cr = YCbCr[i + 2];
+
+		float R = Y + 1.402f * (Cr - 128.0f);
+		float G = Y - 0.344136f * (Cb - 128.0f) - 0.714136f * (Cr - 128.0f);
+		float B = Y + 1.772f * (Cb - 128.0f);
+
+		// // Debugging.
+		// if (i < 15) {
+		// 	printf("Pixel %d -> Y: %f, Cb: %f, Cr: %f\n", i/3, Y, Cb, Cr);
+		// }
+
+		RGB[i] = (unsigned char)std::min(255.0f, std::max(0.0f, R));
+		RGB[i + 1] = (unsigned char)std::min(255.0f, std::max(0.0f, G));
+		RGB[i + 2] = (unsigned char)std::min(255.0f, std::max(0.0f, B));
+	}
+}
+
+void encodeJPEG(const char *imgPath, const char *imgName) {
+
+
+	int width, height, nCh;
+	unsigned char * imgData = stbi_load(imgPath, &width, &height, &nCh, 0);
 	if (imgData == NULL) {
 		printf("Error loading an image %s\n", imgPath);
 		exit(-1);
 	}
 
-	printf("%d scanlines of %d pixels\n", y, x);
-	printf("Each pixel consisting of %d interleaved 8-bit components \n", n);
-	printf("%ld\n", sizeof(imgData));
-
+	// printf("%d scanlines of %d pixels\n", height, width);
+	// printf("Each pixel consisting of %d interleaved 8-bit components \n", nCh);
 
 	// Color Space Transformation.
-	float yCrCbImgData[y * x * 3] = {0};
-	for (int i = 0; i < y * x * 3; i += 3) {
-		
-		float r = imgData[i];
-		float g = imgData[i + 1];
-		float b = imgData[i + 2];
+	unsigned char *YCbCr = (unsigned char *) malloc((width * height * nCh) * sizeof(unsigned char));
+	RGBToYCbCr(imgData, YCbCr, (width * height * nCh));
 
-		float y  =  0.29900f * r + 0.58700f * g + 0.11400f * b;
-		// 128.0f?
-		float cB = -0.16874f * r - 0.33126f * g + 0.50000f * b + 128.0f;
-		float cR =  0.50000f * r - 0.41869f * g - 0.08131f * b + 128.0f;
+	// char * outputPath = "output.jpg";
+	// JpegEncoder encoder;
+	// jpegEncoderInit(&encoder, outputPath, x, y, Q_LUMINANCE, Q_CHROMINANCE);
 
-		yCrCbImgData[i] = y;
-		yCrCbImgData[i + 1] = cB;
-		yCrCbImgData[i + 2] = cR;
+	unsigned char *compressedData = (unsigned char *) malloc((width * height * nCh) * sizeof(unsigned char));
+	int channel, blockYStart, blockXStart;
+	for (channel = 0; channel < 3; channel++) {
+		for (blockYStart = 0; blockYStart < height; blockYStart += 8) {
+			for (blockXStart = 0; blockXStart < width; blockXStart += 8) {
 
-		if (i < 15) {
-			printf("Pixel %d -> Y: %f, Cb: %f, Cr: %f\n", i/3, y, cB, cR);
-		}
-	}
+				float block[8][8];
 
-
-	float blockY[8][8];
-	float blockCb[8][8];
-	float blockCr[8][8];
-	
-	float dctBlockY[8][8];
-	float dctBlockCb[8][8];
-	float dctBlockCr[8][8];
-
-	int quantizedBlockY[8][8];
-	int quantizedBlockCb[8][8];
-	int quantizedBlockCr[8][8];
-
-	int zigzagVectorY[64]  = {0};
-	int zigzagVectorCb[64] = {0};
-	int zigzagVectorCr[64] = {0};
-
-	char * outputPath = "output.jpg";
-	JpegEncoder encoder;
-	jpegEncoderInit(&encoder, outputPath, x, y, Q_LUMINANCE, Q_CHROMINANCE);
-
-	for (int blockYStart = 0; blockYStart < y; blockYStart += 8) {
-		for (int blockXStart = 0; blockXStart < x; blockXStart += 8) {
-
-			for (int row = 0; row < 8; row++) {
-				for (int col = 0; col < 8; col++) {
-
-
-					int currentPixelX = blockXStart + col;
-					int currentPixelY = blockYStart + row;
-					int pixelIdx = (currentPixelY * x + currentPixelX) * 3;
-
-	                blockY[row][col]  = yCrCbImgData[pixelIdx]     - 128.0f;
-                	blockCb[row][col] = yCrCbImgData[pixelIdx + 1] - 128.0f;
-                	blockCr[row][col] = yCrCbImgData[pixelIdx + 2] - 128.0f;
+				// Block Splitting
+				int x, y;
+				for (y = 0; y < 8; y++) {
+					for (x = 0; x < 8; x++) {
+						int idx = ((blockYStart + y) * width + (blockXStart + x)) * 3 + channel;
+						block[y][x] = (float)(YCbCr[idx] - 128.0f); 
+					}
 				}
-			}
+
+				// Discrete Cosine Transform.
+				dct(block);
+
+				// Debugging.
+				// if (blockXStart == 0 && blockYStart == 0) {
+				// 	for (int i = 0; i < 5; i++) {
+				// 		printf("%f ", block[0][i]);
+				// 	}
+				// 	printf("\n");
+				// }
+
+				// Basic Quantization
+				quantizeBlock(block, channel);
+
+				// Decode.
+				dequantizeBlock(block, channel);
+				
+
+				// Debugging.
+				// if (blockXStart == 0 && blockYStart == 0) {
+				// 	for (int i = 0; i < 5; i++) {
+				// 		printf("%f ", block[0][i]);
+				// 	}
+				// 	printf("\n");
+				// }
 
 
 
-			// DFT
-			dct(blockY, dctBlockY);
-			dct(blockCb, dctBlockCb);
-			dct(blockCr, dctBlockCr);
+				// Inverse DCT
+				idct(block);
 
+				// Store the compressed data
+				for (y = 0; y < 8; y++) {
+					for (x = 0; x < 8; x++) {
+						int idx = ((blockYStart + y) * width + (blockXStart + x)) * 3 + channel;
+						float value = block[y][x] + 128.0f;
+						compressedData[idx] = (unsigned char)std::min(255.0f, std::max(0.0f, value));
+					}
+				}
+			}	
 
-			// Quntization
-			quantizeBlock(dctBlockY, quantizedBlockY, Q_LUMINANCE);
-			quantizeBlock(dctBlockCb, quantizedBlockCb, Q_CHROMINANCE);
-			quantizeBlock(dctBlockCr, quantizedBlockCr, Q_CHROMINANCE);
-
-
-			// Zigzag
-			zigzagScanBlock(quantizedBlockY,  zigzagVectorY);
-			zigzagScanBlock(quantizedBlockCb, zigzagVectorCb);
-			zigzagScanBlock(quantizedBlockCr, zigzagVectorCr);
-
-			// Entropy coding (Huffman) straight into the file
-			jpegEncodeBlock(&encoder, zigzagVectorY,  0);
-			jpegEncodeBlock(&encoder, zigzagVectorCb, 1);
-			jpegEncodeBlock(&encoder, zigzagVectorCr, 2);
-
-			// Huffman
-			
-
-
-			// Writing to file. (AI)
-
-		}
-
-		if (blockYStart == 0) {
-			// for (int i = 0; i < 8; i++) {
-			// 	for (int j = 0; j < 8; j++) {
-			// 		printf("%f ", quantizedBlockY[i][j]);
-			// 	}
-			// printf("\n");
-			// }
-
-			// printf("Zig-zag vector values:\n");
-			// for(int i = 0; i < 64; i++) {
-    		// 	printf("%d ", zigzagVectorY[i]);
-			// }
-			// printf("\n");
 		}
 	}
 
-	jpegEncoderFinish(&encoder);
-	printf("Wrote %s\n", outputPath);
+	// Huffman coding.
+
+
+	// Convert back to RGB
+	unsigned char *outputRGB = (unsigned char*) malloc((width * height * nCh) * sizeof(unsigned char));
+	YCbCrToRGB(compressedData, outputRGB, (width * height * nCh));
+
+	char outputPath[200] = {0};
+	strcat(outputPath, imgName);
+	strcat(outputPath, "-encoded.jpg");
+	stbi_write_jpg(outputPath, width, height, 3, outputRGB, 90);
+
+	stbi_image_free(imgData);
+}
+
+int main() {
+
+	const char *baseImgDir = "kodak-image-suite/PhotoCD_PCD0992/";
+
+	struct dirent *entry;
+	DIR *dir = opendir(baseImgDir);
+
+	if (dir == NULL) {
+		perror("opendir: ");
+		exit(-1);
+	}
+
+	while ((entry = readdir(dir)) != NULL) {
+
+		if (strcmp(entry->d_name, ".") == 0 || strcmp(entry->d_name, "..") == 0) continue;
+		printf("%s\n", entry->d_name);
+
+		char imgPath[100] = {0};
+		strcat(imgPath, baseImgDir);
+		strcat(imgPath, entry->d_name);
+
+		encodeJPEG(imgPath, entry->d_name);
+	}
 
 	return 0;
 }
