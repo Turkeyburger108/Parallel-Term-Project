@@ -1,3 +1,27 @@
+/* 
+ * Fast discrete cosine transform algorithms (C)
+ * 
+ * Copyright (c) 2021 Project Nayuki. (MIT License)
+ * https://www.nayuki.io/page/fast-discrete-cosine-transform-algorithms
+ * 
+ * Permission is hereby granted, free of charge, to any person obtaining a copy of
+ * this software and associated documentation files (the "Software"), to deal in
+ * the Software without restriction, including without limitation the rights to
+ * use, copy, modify, merge, publish, distribute, sublicense, and/or sell copies of
+ * the Software, and to permit persons to whom the Software is furnished to do so,
+ * subject to the following conditions:
+ * - The above copyright notice and this permission notice shall be included in
+ *   all copies or substantial portions of the Software.
+ * - The Software is provided "as is", without warranty of any kind, express or
+ *   implied, including but not limited to the warranties of merchantability,
+ *   fitness for a particular purpose and noninfringement. In no event shall the
+ *   authors or copyright holders be liable for any claim, damages or other
+ *   liability, whether in an action of contract, tort or otherwise, arising from,
+ *   out of or in connection with the Software or the use or other dealings in the
+ *   Software.
+ */
+
+
 #include <stdio.h>
 #include <string.h>
 #include <stdlib.h>
@@ -7,6 +31,9 @@
 #include <errno.h>
 
 #include <algorithm>
+#include <chrono>
+#include <iostream>
+
 
 #define STB_IMAGE_IMPLEMENTATION
 #include "stb_image.h"
@@ -27,70 +54,95 @@
 // TODO: 	Improve Performance
 // 			Create a CUDA version.
 
-// O(n^4)
-void dct(float block[8][8]) {
+
+// Naive Version
+void dctVersion1(float in[8][8], float out[8][8]) {
 
 	const float PI = 3.141592653589793f;
 	int u, v, x, y;
-	float temp[8][8];
+	for (v = 0; v < 8; v++)
+	for (u = 0; u < 8; u++)
+	{
 
-	for (v = 0; v < 8; v++) {
-		for (u = 0; u < 8; u++) {
+		float sum = 0.0f;
+		float Cv = (v == 0) ? 1 / sqrtf(2.0f) : 1.0f;
+		float Cu = (u == 0) ? 1 / sqrtf(2.0f) : 1.0f;
 
-			float sum = 0.0f;
-			float cu = (u == 0) ? 1.0f / sqrtf(2.0f) : 1.0f;
-			float cv = (v == 0) ? 1.0f / sqrtf(2.0f) : 1.0f;
-
-			for (y = 0; y < 8; y++) {
-				for (x = 0; x < 8; x++) {
-					sum += block[y][x] *
-					cosf((2.0f * x + 1.0f) * u * PI / 16.0f) *
-					cosf((2.0f * y + 1.0f) * v * PI / 16.0f);
-				}
-			}
-
-			temp[v][u] = 0.25f * cu * cv * sum;
+		for (y = 0; y < 8; y++)
+		for (x = 0; x <8; x++)
+		{
+			sum += in[y][x] * 
+			cosf((2.0f * x + 1.0f) * u * PI / 16.0f) *
+			cosf((2.0f * y + 1.0f) * v * PI / 16.0f);
 		}
-	}
 
-	for (v = 0; v < 8; v++) {
-		for (u = 0; u < 8; u++) {
-			block[v][u] = temp[v][u];
-		}
+		out[v][u] = 0.25f * Cv * Cu * sum;
 	}
 }
 
-void idct(float block[8][8]) {
-
+// Better naive version don't let the word naive fools you.
+// It's over 4X faster with a simple change.
+void dct1D(float in[8], float out[8]) {
+	
 	const float PI = 3.141592653589793f;
-	int u, v, x, y;
-	float temp[8][8];
+	int u, x;
 
-	for (v = 0; v < 8; v++) {
-		for (u = 0; u < 8; u++) {
+	for (u = 0; u < 8; u++) {
 
-			float sum = 0.0f;
-			float cu = (u == 0) ? 1.0f / sqrtf(2.0f) : 1.0f;
-			float cv = (v == 0) ? 1.0f / sqrtf(2.0f) : 1.0f;
+		float sum = 0.0f;
+		float Cu = (u == 0) ? 1 / sqrtf(2.0f) : 1.0f;
 
-			for (y = 0; y < 8; y++) {
-				for (x = 0; x < 8; x++) {
-					sum += block[y][x] * cu * cv *
-					cosf((2.0f * x + 1.0f) * u * PI / 16.0f) *
-					cosf((2.0f * y + 1.0f) * v * PI / 16.0f);
-				}
-			}
-
-			temp[v][u] = 0.25f * sum;
+		for (x = 0; x < 8; x++) {
+			sum += in[x] * cosf((2.0f * x + 1.0f) * u * PI / 16.0f);
 		}
-	}
 
-	for (v = 0; v < 8; v++) {
-		for (u = 0; u < 8; u++) {
-			block[v][u] = temp[v][u];
-		}
+		out[x] = 0.25f * Cu * sum;
 	}
 }
+
+void dctVersion2(float in[8][8], float out[8][8]) {
+
+
+	int i, j;
+	float in1D[8], out1D[8], temp[8][8];
+
+	// transform row
+	for (j = 0; j < 8; j++) {
+		for (i = 0; i < 8; i++) in1D[i] = in[j][i];
+		dct1D(in1D, out1D);
+		for (i = 0; i < 8; i++) temp[j][i] = out1D[i];
+	}
+
+	for (j = 0; j < 8; j++) {
+		for (i = 0; i < 8; i++) in1D[i] = temp[i][j];
+		dct1D(in1D, out1D);
+		for (i = 0; i < 8; i++) out[i][j] = out1D[i];
+	}
+}
+
+void dctVersion2(float in[8][8], float out[8][8]) {
+
+	int i, j;
+	float in1D[8], out1D[8], temp[8][8];
+
+	// transform row
+	for (j = 0; j < 8; j++) {
+		for (i = 0; i < 8; i++) in1D[i] = in[j][i];
+		dct1D(in1D, out1D);
+		for (i = 0; i < 8; i++) temp[j][i] = out1D[i];
+	}
+
+	for (j = 0; j < 8; j++) {
+		for (i = 0; i < 8; i++) in1D[i] = temp[i][j];
+		dct1D(in1D, out1D);
+		for (i = 0; i < 8; i++) out[i][j] = out1D[i];
+	}
+}
+
+
+// void inverseDctVersion1(float block[8][8]) {
+	
+// }
 
 // Standard JPEG Luminance (Y) Quantization Table
 const int Q_LUMINANCE[8][8] = {
@@ -116,25 +168,17 @@ const int Q_CHROMINANCE[8][8] = {
     {99, 99, 99, 99, 99, 99, 99, 99}
 };
 
-void quantizeBlock(float block[8][8], int channel) 
-{
-	float temp[8][8];
+void quantizeBlock(float in[8][8], float out[8][8],int channel) {
+
 	int u, v;
 	for (u = 0; u < 8; u++) {
 		for (v = 0; v < 8; v++) {
 			float quantizedFactor = (channel == 0) ? 
 			Q_LUMINANCE[u][v] : Q_CHROMINANCE[u][v];
-			float quantized = block[u][v] / quantizedFactor;
-			temp[u][v] = (int)roundf(quantized);
+			float quantized = in[u][v] / quantizedFactor;
+			out[u][v] = (int)roundf(quantized);
 		}
 	}
-
-	for (u = 0; u < 8; u++) {
-		for (v = 0; v < 8; v++) {
-			block[u][v] = temp[u][v];
-		}
-	}
-
 }
 
 void dequantizeBlock(float block[8][8], int channel) {
@@ -222,13 +266,10 @@ void encodeJPEG(const char *imgPath, const char *imgName) {
 	unsigned char *YCbCr = (unsigned char *) malloc((width * height * nCh) * sizeof(unsigned char));
 	RGBToYCbCr(imgData, YCbCr, (width * height * nCh));
 
-	// char * outputPath = "output.jpg";
-	// JpegEncoder encoder;
-	// jpegEncoderInit(&encoder, outputPath, x, y, Q_LUMINANCE, Q_CHROMINANCE);
-
 	unsigned char *compressedData = (unsigned char *) malloc((width * height * nCh) * sizeof(unsigned char));
 	int channel, blockYStart, blockXStart;
 	for (channel = 0; channel < 3; channel++) {
+		auto begin = std::chrono::high_resolution_clock::now();
 		for (blockYStart = 0; blockYStart < height; blockYStart += 8) {
 			for (blockXStart = 0; blockXStart < width; blockXStart += 8) {
 
@@ -244,35 +285,18 @@ void encodeJPEG(const char *imgPath, const char *imgName) {
 				}
 
 				// Discrete Cosine Transform.
-				dct(block);
-
-				// Debugging.
-				// if (blockXStart == 0 && blockYStart == 0) {
-				// 	for (int i = 0; i < 5; i++) {
-				// 		printf("%f ", block[0][i]);
-				// 	}
-				// 	printf("\n");
-				// }
+				float dctBlock[8][8];
+				dctVersion2(block, dctBlock);
 
 				// Basic Quantization
-				quantizeBlock(block, channel);
-
-				// Decode.
-				dequantizeBlock(block, channel);
-				
-
-				// Debugging.
-				// if (blockXStart == 0 && blockYStart == 0) {
-				// 	for (int i = 0; i < 5; i++) {
-				// 		printf("%f ", block[0][i]);
-				// 	}
-				// 	printf("\n");
-				// }
+				float quantizedBlock[8][8];
+				quantizeBlock(dctBlock, quantizedBlock, channel);
 
 
-
+				// Here's what a decoder would do.
+				// dequantizeBlock(block, channel);
 				// Inverse DCT
-				idct(block);
+				// idct(block);
 
 				// Store the compressed data
 				for (y = 0; y < 8; y++) {
@@ -285,18 +309,22 @@ void encodeJPEG(const char *imgPath, const char *imgName) {
 			}	
 
 		}
+		auto end = std::chrono::high_resolution_clock::now();
+		auto elapsedCPU = std::chrono::duration_cast<std::chrono::milliseconds>(end - begin);
+		std::cout << elapsedCPU.count() / 1000.0f  << " seconds" << std::endl;
 	}
 
-	// Huffman coding.
+	// For convenience we skip additional entropy coding and just
+	// convert compressed data back to RGB then write to another file.
 
-
-	// Convert back to RGB
 	unsigned char *outputRGB = (unsigned char*) malloc((width * height * nCh) * sizeof(unsigned char));
 	YCbCrToRGB(compressedData, outputRGB, (width * height * nCh));
 
 	char outputPath[200] = {0};
+	strcat(outputPath, "output/");
 	strcat(outputPath, imgName);
 	strcat(outputPath, "-encoded.jpg");
+	printf("%s\n", outputPath);
 	stbi_write_jpg(outputPath, width, height, 3, outputRGB, 90);
 
 	stbi_image_free(imgData);
@@ -304,7 +332,7 @@ void encodeJPEG(const char *imgPath, const char *imgName) {
 
 int main() {
 
-	const char *baseImgDir = "kodak-image-suite/PhotoCD_PCD0992/";
+	const char *baseImgDir = "image-datasets/kodak/";
 
 	struct dirent *entry;
 	DIR *dir = opendir(baseImgDir);
@@ -323,7 +351,11 @@ int main() {
 		strcat(imgPath, baseImgDir);
 		strcat(imgPath, entry->d_name);
 
+		auto begin = std::chrono::high_resolution_clock::now();
 		encodeJPEG(imgPath, entry->d_name);
+		auto end = std::chrono::high_resolution_clock::now();
+		auto elapsedCPU = std::chrono::duration_cast<std::chrono::milliseconds>(end - begin);
+		std::cout << elapsedCPU.count() / 1000.0f  << " seconds" << std::endl;
 	}
 
 	return 0;
