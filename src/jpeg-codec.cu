@@ -17,23 +17,11 @@
 #define STB_IMAGE_WRITE_IMPLEMENTATION
 #include "stb_image_write.h"
 
-// Slower.
 
-/* JPEG (sequential) encoding
-	Color space transformation : Checked!
-	Block splitting (no padding for now) : Checked
-	Discrete cosine transform : Checked
-	Quantization : Checked
-	Entropy coding (Optional)
-*/
- 
-// TODO: 	Improve Performance
-// 			Create a CUDA version.
-
-
+// #define WITH_ANALYSIS
 #define WTIH_DECODING
-
 #define WITH_CUDA
+// #define WITH_TIME_PER_IMAGE
 
 #define JPEG_BLOCK_WIDTH 8
 #define JPEG_BLOCK_HEIGHT 8
@@ -63,6 +51,28 @@ const int Q_CHROMINANCE[8][8] = {
     {99, 99, 99, 99, 99, 99, 99, 99}
 };
 
+const int h_Q_LUMINANCE[64] = {
+    16, 11, 10, 16, 24,  40,  51,  61,
+    12, 12, 14, 19, 26,  58,  60,  55,
+    14, 13, 16, 24, 40,  57,  69,  56,
+    14, 17, 22, 29, 51,  87,  80,  62,
+    18, 22, 37, 56, 68, 109, 103,  77,
+    24, 35, 55, 64, 81, 104, 113,  92,
+    49, 64, 78, 87, 103, 121, 120, 101,
+    72, 92, 95, 98, 112, 100, 103,  99
+};
+
+const int h_Q_CHROMINANCE[64] = {
+    17, 18, 24, 47, 99, 99, 99, 99,
+    18, 21, 26, 66, 99, 99, 99, 99,
+    24, 26, 56, 99, 99, 99, 99, 99,
+    47, 66, 99, 99, 99, 99, 99, 99,
+    99, 99, 99, 99, 99, 99, 99, 99,
+    99, 99, 99, 99, 99, 99, 99, 99,
+    99, 99, 99, 99, 99, 99, 99, 99,
+    99, 99, 99, 99, 99, 99, 99, 99
+};
+
 
 // Precompute cosine bases
 static const float COS_TABLE[8][8] = {
@@ -75,6 +85,150 @@ static const float COS_TABLE[8][8] = {
     {0.382683426f, -0.923879504f, 0.923879564f, -0.382683903f, -0.382682979f, 0.923879325f, -0.923879743f, 0.382683903f}, // u = 6
     {0.195090234f, -0.555570006f, 0.831469357f, -0.980785191f, 0.980785429f, -0.831469595f, 0.555571139f, -0.195091546f} // u = 7
 };
+
+static const float h_COS_TABLE[64] = {
+    // u = 0
+    1.0f, 1.0f, 1.0f, 1.0f, 1.0f, 1.0f, 1.0f, 1.0f,
+    // u = 1
+    0.980785251f, 0.831469595f, 0.555570185f, 0.195090234f, -0.195090324f, -0.555570364f, -0.831469655f, -0.98078531f,
+    // u = 2
+    0.923879504f, 0.382683426f, -0.382683516f, -0.923879623f, -0.923879504f, -0.382683128f, 0.382683605f, 0.923879564f,
+    // u = 3
+    0.831469595f, -0.195090324f, -0.98078531f, -0.555570006f, 0.555570424f, 0.980785251f, 0.19509007f, -0.831469774f,
+    // u = 4
+    0.707106769f, -0.707106769f, -0.70710665f, 0.707107008f, 0.707106769f, -0.707107246f, -0.707106531f, 0.707106829f,
+    // u = 5
+    0.555570185f, -0.98078531f, 0.195090413f, 0.831469357f, -0.831469774f, -0.195090219f, 0.98078531f, -0.555570841f,
+    // u = 6
+    0.382683426f, -0.923879504f, 0.923879564f, -0.382683903f, -0.382682979f, 0.923879325f, -0.923879743f, 0.382683903f,
+    // u = 7
+    0.195090234f, -0.555570006f, 0.831469357f, -0.980785191f, 0.980785429f, -0.831469595f, 0.555571139f, -0.195091546f
+};
+
+
+// CUDA
+// -------------------------------------
+
+
+__constant__ float COS_TABLE_GPU[64];
+__constant__ int d_Q_LUMINANCE[64];
+__constant__ int d_Q_CHROMINANCE[64];
+
+__global__ void dctGPU(float *in, float *out, int width, int height) {
+
+	__shared__ float tile[8][8];
+
+	int tx = threadIdx.x;
+	int ty = threadIdx.y;
+	int x = blockIdx.x * 8 + tx;
+	int y = blockIdx.y * 8 + ty;
+
+	tile[ty][tx] = in[y * width + x];
+	__syncthreads();
+
+	float row_sum = 0.0f;
+    for (int i = 0; i < 8; i++) {
+        row_sum += tile[ty][i] * COS_TABLE_GPU[tx * 8 + i];
+    }
+
+    __syncthreads(); 
+    tile[ty][tx] = row_sum;
+    __syncthreads();
+
+    float col_sum = 0.0f;
+    for (int j = 0; j < 8; j++) {
+        col_sum += tile[j][tx] * COS_TABLE_GPU[ty * 8 + j];
+    }
+
+	#ifdef NAIVE_GPU
+	float sum = 0.0f;
+	int i, j;
+	for (j = 0; j < 8; j++) 
+	for (i = 0; i < 8; i++) 
+	{
+		// sum += tile[j * 8 + i] * COS_TABLE_GPU[tx * 8 + i] * COS_TABLE_GPU[ty * 8 + j];
+	}
+	#endif
+
+	float Cu = (tx == 0) ? 1.0f / sqrtf(2.0f) : 1.0f;
+	float Cv = (ty == 0) ? 1.0f / sqrtf(2.0f) : 1.0f;
+
+	out[y * width + x] = 0.25f * Cu * Cv * col_sum;
+}
+
+__global__ void iDctGPU(float *in, float *out, int width, int height) {
+
+	__shared__ float tile[8][8];
+
+	int tx = threadIdx.x;
+	int ty = threadIdx.y;
+	int x = blockIdx.x * 8 + tx;
+	int y = blockIdx.y * 8 + ty;
+
+	tile[ty][tx] = in[y * width + x];
+	__syncthreads();
+
+	
+	#ifdef NAIVE_GPU
+	float sum = 0.0f;
+	int i, j;
+	for (j = 0; j < 8; j++) {
+
+		float Cv = (j == 0) ? 1.0f / sqrtf(2.0f) : 1.0f;
+		for (i = 0; i < 8; i++) 
+		{
+			float Cu = (i == 0) ? 1.0f / sqrtf(2.0f) : 1.0f;
+			sum += Cu * Cv * tile[j * 8 + i] * 
+			COS_TABLE_GPU[i * 8 + tx] * 
+			COS_TABLE_GPU[j * 8 + ty];
+		}
+	}
+	#endif
+
+	float row_sum = 0.0f;
+    for (int i = 0; i < 8; i++) {
+		float Cu = (i == 0) ? 1.0f / sqrtf(2.0f) : 1.0f;
+        row_sum += Cu * tile[ty][i] * COS_TABLE_GPU[i * 8 + tx];
+    }
+
+    __syncthreads(); 
+    tile[ty][tx] = row_sum;
+    __syncthreads();
+
+    float col_sum = 0.0f;
+    for (int j = 0; j < 8; j++) {
+		float Cv = (j == 0) ? 1.0f / sqrtf(2.0f) : 1.0f;
+        col_sum += Cv * tile[j][tx] * COS_TABLE_GPU[j * 8 + ty];
+    }
+
+	out[y * width + x] = 0.25f * col_sum;
+}
+
+__global__ void deQuantizeGPU(float *in, float *out, int width, int height, int channel) {
+
+	int tx = threadIdx.x;
+	int ty = threadIdx.y;
+	int x = blockIdx.x * 8 + tx;
+	int y = blockIdx.y * 8 + ty;
+
+	int qFactor = (channel == 0) ? d_Q_LUMINANCE[ty * 8 + tx] : d_Q_CHROMINANCE[ty * 8 + tx];
+	out[y * width + x] = (int)roundf(in[y * width + x] * qFactor) ;
+}
+
+
+__global__ void quantizeGPU(float *in, float *out, int width, int height, int channel) {
+
+	int tx = threadIdx.x;
+	int ty = threadIdx.y;
+	int x = blockIdx.x * 8 + tx;
+	int y = blockIdx.y * 8 + ty;
+
+	int qFactor = (channel == 0) ? d_Q_LUMINANCE[ty * 8 + tx] : d_Q_CHROMINANCE[ty * 8 + tx];
+	out[y * width + x] = (int)roundf(in[y * width + x] / qFactor) ;
+}
+
+// -------------------------------------
+
 
 // Decoding
 // --------------------------
@@ -316,8 +470,98 @@ void encodeJPEG(const char *imgPath, const char *imgName) {
 
 	unsigned char *compressedData = (unsigned char *) malloc((width * height * nCh) * sizeof(unsigned char));
 	int channel, blockYStart, blockXStart;
-
 	long totalCoeffs = 0, zeroCoeffs = 0, rleBytes = 0;
+
+	#ifdef WITH_CUDA
+
+	for (channel = 0; channel < 3; channel++) {
+		
+		float *channelData = (float *)malloc((width * height) * sizeof(float));
+		for (int i = 0; i < width * height; i++) {
+			channelData[i] = (float)(YCbCr[i * 3 + channel] - 128.0f);
+		}
+
+		float *dIn, *dOut;
+		cudaMalloc(&dIn, (width * height) * sizeof(float));
+		cudaMalloc(&dOut, (width * height) * sizeof(float));
+		cudaMemcpy(dIn, 
+			channelData, 
+			(width * height) * sizeof(float), 
+			cudaMemcpyHostToDevice);
+		cudaMemcpyToSymbol(COS_TABLE_GPU, h_COS_TABLE, 64 * sizeof(float));
+
+
+		dim3 block(8, 8);
+		dim3 grid((width + 7) / 8, (height + 7) / 8);
+		dctGPU<<<grid, block>>>(dIn, dOut, width, height);
+		cudaDeviceSynchronize();
+
+		cudaMemcpy(channelData, dOut, (width * height) * sizeof(float), cudaMemcpyDeviceToHost);
+
+		cudaMemcpy(dIn, 
+			channelData, 
+			(width * height) * sizeof(float), 
+			cudaMemcpyHostToDevice);
+		cudaMemcpyToSymbol(d_Q_LUMINANCE, h_Q_LUMINANCE, sizeof(h_Q_LUMINANCE));
+    	cudaMemcpyToSymbol(d_Q_CHROMINANCE, h_Q_CHROMINANCE, sizeof(h_Q_CHROMINANCE));
+
+		quantizeGPU<<<grid, block>>>(dIn, dOut, width, height, channel);
+		cudaDeviceSynchronize();
+
+		cudaMemcpy(channelData, dOut, (width * height) * sizeof(float), cudaMemcpyDeviceToHost);
+
+		#ifdef WITH_ANALYSIS
+		// Extract 8x8 blocks accounting for image stride & analyze
+        for (int by = 0; by < height; by += 8) {
+            for (int bx = 0; bx < width; bx += 8) {
+                float blockBuffer[64];
+
+                // Gather 8x8 block using row-major image stride
+                for (int r = 0; r < 8; r++) {
+                    for (int c = 0; c < 8; c++) {
+                        blockBuffer[r * 8 + c] = channelData[(by + r) * width + (bx + c)];
+                    }
+                }
+
+                analyzeQuantizedBlock(blockBuffer, zeroCoeffs, rleBytes);
+            }
+        }
+		#endif
+
+
+		#ifdef WTIH_DECODING
+		// Decoding (GPU Simple)
+		// ---------------------------------------
+		cudaMemcpy(dIn, 
+			channelData, 
+			(width * height) * sizeof(float), 
+			cudaMemcpyHostToDevice);
+		deQuantizeGPU<<<grid, block>>>(dIn, dOut, width, height, channel);
+		cudaDeviceSynchronize();
+		cudaMemcpy(channelData, dOut, (width * height) * sizeof(float), cudaMemcpyDeviceToHost);
+		
+		cudaMemcpy(dIn, 
+			channelData, 
+			(width * height) * sizeof(float), 
+			cudaMemcpyHostToDevice);
+		iDctGPU<<<grid, block>>>(dIn, dOut, width, height);
+		cudaDeviceSynchronize();
+		cudaMemcpy(channelData, dOut, (width * height) * sizeof(float), cudaMemcpyDeviceToHost);
+
+		// ---------------------------------------
+		#endif
+
+		cudaFree(dIn);
+		cudaFree(dOut);
+
+		for (int i = 0; i < width * height; i++) {
+			float value = channelData[i] + 128.0f;
+			int idx = i * 3 + channel;
+			compressedData[idx] = value;
+		}
+	}
+
+	#else
 
 	for (channel = 0; channel < 3; channel++) {
 		for (blockYStart = 0; blockYStart < height; blockYStart += 8) {
@@ -344,11 +588,12 @@ void encodeJPEG(const char *imgPath, const char *imgName) {
 				float quantizedBlock[64];
 				quantizeBlock(dctBlock, quantizedBlock, channel);
 
+				#ifdef WITH_ANALYSIS
 				// Compression statistics
 				totalCoeffs += 64;
 				analyzeQuantizedBlock(quantizedBlock, zeroCoeffs, rleBytes);
 				// ---------------------------------------
-
+				#endif
 
 				#ifdef WTIH_DECODING
 				// Decoding (Simple)
@@ -376,6 +621,7 @@ void encodeJPEG(const char *imgPath, const char *imgName) {
 
 		}
 	}
+	#endif
 
 	unsigned char *outputRGB = (unsigned char*) malloc((width * height * nCh) * sizeof(unsigned char));
 	YCbCrToRGB(compressedData, outputRGB, (width * height * nCh));
@@ -386,6 +632,7 @@ void encodeJPEG(const char *imgPath, const char *imgName) {
 	strcat(outputPath, "-compressed.png");
 	stbi_write_png(outputPath, width, height, 3, outputRGB, width * 3);
 
+	#ifdef WITH_ANALYSIS
 	// Compression statistics summary
 	struct stat st;
 	long origBytes = (stat(imgPath, &st) == 0) ? (long)st.st_size : 0;
@@ -398,6 +645,7 @@ void encodeJPEG(const char *imgPath, const char *imgName) {
 	} else {
 		printf("\n");
 	}
+	#endif
 
 	stbi_image_free(imgData);
 	free(outputRGB);
@@ -434,6 +682,23 @@ int main() {
 		
 		#ifdef WITH_CUDA
 
+		auto begin = std::chrono::high_resolution_clock::now();
+		encodeJPEG(imgPath, entry->d_name);
+		auto end = std::chrono::high_resolution_clock::now();
+		auto elapsedCPU = std::chrono::duration_cast<std::chrono::milliseconds>(end - begin);
+
+		if (i < 250000) {
+				
+			#ifdef WITH_TIME_PER_IMAGE
+			std::cout << imgPath << std::endl;
+			std::cout << elapsedCPU.count() / 1000.0f  << " seconds" << std::endl;
+			#endif
+
+			i++;
+		} else {
+			 break;
+		}
+
 		#else
 		// CPU
 		auto begin = std::chrono::high_resolution_clock::now();
@@ -442,8 +707,12 @@ int main() {
 		auto elapsedCPU = std::chrono::duration_cast<std::chrono::milliseconds>(end - begin);
 		
 		if (i < 250000) {
+
+			#ifdef WITH_TIME_PER_IMAGE
 			std::cout << imgPath << std::endl;
 			std::cout << elapsedCPU.count() / 1000.0f  << " seconds" << std::endl;
+			#endif
+
 			i++;
 		} else {
 			 break;
