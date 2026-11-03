@@ -1,3 +1,6 @@
 [submodule "image-datasets"]
 	path = image-datasets
 	url = git@github.com:castano/image-datasets.git
+[submodule "cuda-samples"]
+	path = cuda-samples
+	url = git@github.com:NVIDIA/cuda-samples.git
