@@ -29,7 +29,7 @@ you can comment or uncomment to enable certain features.
 `WITH_ANALYSIS // Display the amount of entropy compressed` \
 `WTIH_DECODING // Include Dequantization and Inverse DCT` \
 `WITH_CUDA // Switch to CUDA implementation` \
-`WITH_TIME_PER_IMAGE // Display the time it takes to operate 1 image` \
+`WITH_TIME_PER_IMAGE // Display the time it takes to operate 1 image` 
 
 
 ### How to compile
