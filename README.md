@@ -13,7 +13,7 @@
   + cuda-samples
   + image-datasets
 
-## How to run.
+## How to run
 
 ### Prerequisite
 
