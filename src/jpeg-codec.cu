@@ -18,10 +18,12 @@
 #include "stb_image_write.h"
 
 
-// #define WITH_ANALYSIS
-#define WTIH_DECODING
-#define WITH_CUDA
-// #define WITH_TIME_PER_IMAGE
+// FLAGS
+
+// #define WITH_ANALYSIS // Display the amount of entropy compressed
+#define WTIH_DECODING // Include Dequantization and Inverse DCT
+#define WITH_CUDA // Switch to CUDA implementation
+// #define WITH_TIME_PER_IMAGE // Display the time it takes to operate 1 image
 
 #define JPEG_BLOCK_WIDTH 8
 #define JPEG_BLOCK_HEIGHT 8
@@ -553,6 +555,9 @@ void encodeJPEG(const char *imgPath, const char *imgName) {
 
 		cudaFree(dIn);
 		cudaFree(dOut);
+		cudaFree(d_Q_LUMINANCE);
+		cudaFree(d_Q_CHROMINANCE);
+		cudaFree(COS_TABLE_GPU);
 
 		for (int i = 0; i < width * height; i++) {
 			float value = channelData[i] + 128.0f;
